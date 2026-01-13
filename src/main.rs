@@ -49,6 +49,7 @@ fn from_args() -> Result<(), String> {
         ses.settings.as_ref().unwrap(),
         ses.svg,
         ses.commit_limit,
+        ses.start_point,
     )
 }
 
@@ -117,6 +118,14 @@ fn match_args() -> ArgMatches {
                 .num_args(0),
         )
         .arg(
+            Arg::new("current")
+                .long("current")
+                .short('c')
+                .help("Show only commits reachable from the current HEAD.")
+                .required(false)
+                .num_args(0),
+        )
+        .arg(
             Arg::new("style")
                 .long("style")
                 .short('s')
@@ -154,6 +163,11 @@ fn configure_session(ses: &mut Session, matches: &ArgMatches) -> Result<bool, St
     let reverse_commit_order = matches.get_flag("reverse");
 
     ses.svg = matches.get_flag("svg");
+    ses.start_point = if matches.get_flag("current") {
+        Some("HEAD".to_string())
+    } else {
+        None
+    };
     let compact = !matches.get_flag("sparse");
     let debug = matches.get_flag("debug");
     let style = matches
@@ -204,6 +218,7 @@ struct Session {
     pub repository: Option<Repository>,
     pub svg: bool,
     pub commit_limit: Option<usize>,
+    pub start_point: Option<String>,
 }
 
 impl Session {
@@ -219,6 +234,7 @@ impl Session {
             repository: None,
             svg: false,
             commit_limit: None,
+            start_point: None,
         }
     }
 }
@@ -597,9 +613,10 @@ fn run(
     settings: &Settings,
     svg: bool,
     max_commits: Option<usize>,
+    start_point: Option<String>,
 ) -> Result<(), String> {
     let now = Instant::now();
-    let graph = GitGraph::new(repository, settings, None, max_commits)?;
+    let graph = GitGraph::new(repository, settings, start_point, max_commits)?;
 
     let duration_graph = now.elapsed().as_micros();
 
