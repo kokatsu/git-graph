@@ -383,10 +383,11 @@ pub fn format_oneline(
     write!(out, "{} {}", branches, commit.summary().unwrap_or("")).unwrap();
 
     if let Some(wrap) = wrapping {
-        textwrap::fill(&out, wrap)
+        let lines: Vec<String> = textwrap::fill(&out, wrap)
             .lines()
-            .map(|str| str.to_string())
-            .collect()
+            .map(|s| s.to_string())
+            .collect();
+        fix_ansi_continuation(lines)
     } else {
         vec![out]
     }
@@ -542,11 +543,11 @@ fn append_wrapped(vec: &mut Vec<String>, str: String, wrapping: &Option<Options>
     if str.is_empty() {
         vec.push(str);
     } else if let Some(wrap) = wrapping {
-        vec.extend(
-            textwrap::fill(&str, wrap)
-                .lines()
-                .map(|str| str.to_string()),
-        )
+        let lines: Vec<String> = textwrap::fill(&str, wrap)
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        vec.extend(fix_ansi_continuation(lines));
     } else {
         vec.push(str);
     }
@@ -566,4 +567,142 @@ fn remove_empty_lines(lines: &mut Vec<String>, mut line: String) -> String {
         line = lines.remove(lines.len() - 1);
     }
     line
+}
+
+/// Fixes ANSI color code continuation across wrapped lines.
+///
+/// When textwrap splits a colored string, the second line loses the color
+/// because the ANSI escape sequence only appears at the start of the colored
+/// segment. This function tracks active ANSI codes and prepends them to
+/// continuation lines.
+fn fix_ansi_continuation(lines: Vec<String>) -> Vec<String> {
+    if lines.len() <= 1 {
+        return lines;
+    }
+
+    let mut result = Vec::with_capacity(lines.len());
+    let mut active_color: Option<String> = None;
+
+    for (i, line) in lines.into_iter().enumerate() {
+        let fixed_line = if i > 0 && active_color.is_some() {
+            format!("{}{}", active_color.as_ref().unwrap(), line)
+        } else {
+            line
+        };
+
+        // Track the last active color code in this line
+        active_color = find_active_ansi_code(&fixed_line);
+        result.push(fixed_line);
+    }
+    result
+}
+
+/// Finds the last active (non-reset) ANSI color code in a string.
+///
+/// ANSI escape sequences have the format: ESC [ <params> m
+/// where ESC is \x1b (0x1b). Reset codes like \x1b[0m or \x1b[m clear the color.
+/// Returns None if no color is active at the end of the string.
+fn find_active_ansi_code(s: &str) -> Option<String> {
+    let mut last_code: Option<String> = None;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Look for ESC character (0x1b)
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let start = i;
+            i += 2; // Skip ESC and '['
+
+            // Read until 'm' (end of ANSI sequence)
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+
+            if i < bytes.len() {
+                i += 1; // Include 'm'
+                let code = &s[start..i];
+
+                // Check if this is a reset code
+                if code == "\x1b[0m" || code == "\x1b[m" {
+                    last_code = None;
+                } else {
+                    last_code = Some(code.to_string());
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    last_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_active_ansi_code_no_codes() {
+        assert_eq!(find_active_ansi_code("plain text"), None);
+    }
+
+    #[test]
+    fn test_find_active_ansi_code_with_color() {
+        // Yellow color code (fixed color 11)
+        let s = "\x1b[38;5;11mhello";
+        assert_eq!(find_active_ansi_code(s), Some("\x1b[38;5;11m".to_string()));
+    }
+
+    #[test]
+    fn test_find_active_ansi_code_with_reset() {
+        // Color followed by reset
+        let s = "\x1b[38;5;11mhello\x1b[0m world";
+        assert_eq!(find_active_ansi_code(s), None);
+    }
+
+    #[test]
+    fn test_find_active_ansi_code_multiple_colors() {
+        // Multiple colors - should return the last active one
+        let s = "\x1b[38;5;11mhello\x1b[0m \x1b[38;5;14mworld";
+        assert_eq!(find_active_ansi_code(s), Some("\x1b[38;5;14m".to_string()));
+    }
+
+    #[test]
+    fn test_fix_ansi_continuation_single_line() {
+        let lines = vec!["single line".to_string()];
+        assert_eq!(fix_ansi_continuation(lines.clone()), lines);
+    }
+
+    #[test]
+    fn test_fix_ansi_continuation_no_color() {
+        let lines = vec!["line one".to_string(), "line two".to_string()];
+        assert_eq!(fix_ansi_continuation(lines.clone()), lines);
+    }
+
+    #[test]
+    fn test_fix_ansi_continuation_with_color() {
+        // Simulates textwrap splitting a colored string
+        // Original: "\x1b[38;5;11m[release-3.14.2-hotfix-03]\x1b[0m"
+        // After wrap: line1 ends with color still active, line2 has no color
+        let lines = vec![
+            "\x1b[38;5;11m[release-3.14.2-hotfix-".to_string(),
+            "03]\x1b[0m".to_string(),
+        ];
+        let fixed = fix_ansi_continuation(lines);
+        assert_eq!(fixed.len(), 2);
+        assert_eq!(fixed[0], "\x1b[38;5;11m[release-3.14.2-hotfix-");
+        // Second line should have color prepended
+        assert_eq!(fixed[1], "\x1b[38;5;11m03]\x1b[0m");
+    }
+
+    #[test]
+    fn test_fix_ansi_continuation_color_reset_before_wrap() {
+        // Color is reset before the line break - no continuation needed
+        let lines = vec![
+            "\x1b[38;5;11mhello\x1b[0m world".to_string(),
+            "next line".to_string(),
+        ];
+        let fixed = fix_ansi_continuation(lines);
+        assert_eq!(fixed[1], "next line");
+    }
 }
