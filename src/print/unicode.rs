@@ -1,7 +1,7 @@
 //! Create graphs in Unicode format with ANSI X3.64 / ISO 6429 colour codes
 
 use crate::graph::{BranchInfo, CommitInfo, GitGraph, HeadInfo};
-use crate::print::format::CommitFormat;
+use crate::print::format::{CommitFormat, HashStyle};
 use crate::settings::{Characters, Settings};
 use itertools::Itertools;
 use std::cmp::max;
@@ -168,6 +168,7 @@ fn build_commit_lines_and_map<'a>(
             head,
             settings.colored,
             wrap_options,
+            settings,
         )?;
 
         let num_lines = if lines.is_empty() { 0 } else { lines.len() - 1 };
@@ -756,12 +757,13 @@ fn print_graph(
 
 /// Format a commit.
 fn format(
-    format: &CommitFormat,
+    fmt: &CommitFormat,
     graph: &GitGraph,
     info: &CommitInfo,
     head: Option<&HeadInfo>,
     color: bool,
     wrapping: &Option<Options>,
+    settings: &Settings,
 ) -> Result<Vec<String>, String> {
     let commit = graph
         .repository
@@ -770,9 +772,28 @@ fn format(
 
     let branch_str = format_branches(graph, info, head, color);
 
-    let hash_color = if color { Some(HASH_COLOR) } else { None };
+    // Determine hash style: use highlight_head settings for HEAD commit, otherwise default
+    let hash_style = if color {
+        if head.is_some() {
+            // HEAD commit - use highlight_head settings if available
+            settings.highlight_head.as_ref().map(|h| HashStyle {
+                color: h.color.or(Some(HASH_COLOR)),
+                bold: h.bold,
+                background: h.background,
+            })
+        } else {
+            // Non-HEAD commit - use default hash color
+            Some(HashStyle {
+                color: Some(HASH_COLOR),
+                bold: false,
+                background: None,
+            })
+        }
+    } else {
+        None
+    };
 
-    crate::print::format::format(&commit, branch_str, wrapping, hash_color, format)
+    crate::print::format::format(&commit, branch_str, wrapping, hash_style.as_ref(), fmt)
 }
 
 /// Format branches and tags.

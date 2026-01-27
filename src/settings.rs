@@ -39,6 +39,17 @@ pub enum BranchOrder {
     LongestFirst(bool),
 }
 
+/// Style options for highlighting the HEAD commit hash.
+#[derive(Clone, Default)]
+pub struct HighlightHead {
+    /// Apply bold formatting
+    pub bold: bool,
+    /// Foreground color (ANSI 256-color code)
+    pub color: Option<u8>,
+    /// Background color (ANSI 256-color code)
+    pub background: Option<u8>,
+}
+
 /// Top-level settings
 pub struct Settings {
     /// Reverse the order of commits
@@ -63,6 +74,8 @@ pub struct Settings {
     pub branches: BranchSettings,
     /// Regex patterns for finding branch names in merge commit summaries
     pub merge_patterns: MergePatterns,
+    /// Highlight style for HEAD commit hash
+    pub highlight_head: Option<HighlightHead>,
 }
 
 /// Helper for reading BranchSettings, required due to RegEx.

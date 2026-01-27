@@ -16,7 +16,8 @@ use git_graph::print::format::CommitFormat;
 use git_graph::print::svg::print_svg;
 use git_graph::print::unicode::print_unicode;
 use git_graph::settings::{
-    BranchOrder, BranchSettings, BranchSettingsDef, Characters, MergePatterns, Settings,
+    BranchOrder, BranchSettings, BranchSettingsDef, Characters, HighlightHead, MergePatterns,
+    Settings,
 };
 use platform_dirs::AppDirs;
 use std::path::PathBuf;
@@ -73,6 +74,7 @@ fn match_args() -> ArgMatches {
     let app = add_color_args(app);
     let app = add_wrap_args(app);
     let app = add_format_args(app);
+    let app = add_highlight_head_args(app);
 
     let app = app
         .arg(
@@ -189,6 +191,8 @@ fn configure_session(ses: &mut Session, matches: &ArgMatches) -> Result<bool, St
 
     let wrapping = match_wrap_args(ses, matches)?;
 
+    let highlight_head = match_highlight_head_args(matches)?;
+
     let settings = Settings {
         reverse_commit_order,
         debug,
@@ -201,6 +205,7 @@ fn configure_session(ses: &mut Session, matches: &ArgMatches) -> Result<bool, St
         branch_order: BranchOrder::ShortestFirst(true),
         branches: BranchSettings::from(model).map_err(|err| err.to_string())?,
         merge_patterns: MergePatterns::default(),
+        highlight_head,
     };
     ses.settings = Some(settings);
 
@@ -602,6 +607,94 @@ fn match_format_args(_ses: &mut Session, matches: &ArgMatches) -> Result<CommitF
         Some(str) => CommitFormat::from_str(str)?,
     };
     Ok(format)
+}
+
+//
+//  highlight-head flag
+//
+
+fn add_highlight_head_args(app: Command) -> Command {
+    app.arg(
+        Arg::new("highlight-head")
+            .long("highlight-head")
+            .help(
+                "Highlight the HEAD commit hash with special styling.\n\
+                   Comma-separated list of: bold, <color>, bg:<color>\n\
+                   Colors: black, red, green, yellow, blue, magenta, cyan, white,\n  \
+                     bright_black, bright_red, bright_green, bright_yellow,\n  \
+                     bright_blue, bright_magenta, bright_cyan, bright_white",
+            )
+            .long_help(
+                "Highlight the HEAD commit hash with special styling.\n\
+                   Comma-separated list of options:\n    \
+                       bold              - Make the hash bold\n    \
+                       <color>           - Set foreground color\n    \
+                       bg:<color>        - Set background color\n\
+                   Available colors:\n    \
+                       black, red, green, yellow, blue, magenta, cyan, white,\n    \
+                       bright_black, bright_red, bright_green, bright_yellow,\n    \
+                       bright_blue, bright_magenta, bright_cyan, bright_white\n\
+                   Examples:\n    \
+                       --highlight-head bold\n    \
+                       --highlight-head red\n    \
+                       --highlight-head \"bold,bright_green\"\n    \
+                       --highlight-head \"bold,bright_green,bg:black\"",
+            )
+            .required(false)
+            .num_args(1),
+    )
+}
+
+fn match_highlight_head_args(matches: &ArgMatches) -> Result<Option<HighlightHead>, String> {
+    let Some(value) = matches.get_one::<String>("highlight-head") else {
+        return Ok(None);
+    };
+
+    let mut highlight = HighlightHead::default();
+
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if part == "bold" {
+            highlight.bold = true;
+        } else if let Some(bg_color) = part.strip_prefix("bg:") {
+            highlight.background = Some(parse_color_name(bg_color)?);
+        } else {
+            // Treat as foreground color
+            highlight.color = Some(parse_color_name(part)?);
+        }
+    }
+
+    Ok(Some(highlight))
+}
+
+fn parse_color_name(name: &str) -> Result<u8, String> {
+    match name {
+        "black" => Ok(0),
+        "red" => Ok(1),
+        "green" => Ok(2),
+        "yellow" => Ok(3),
+        "blue" => Ok(4),
+        "magenta" => Ok(5),
+        "cyan" => Ok(6),
+        "white" => Ok(7),
+        "bright_black" => Ok(8),
+        "bright_red" => Ok(9),
+        "bright_green" => Ok(10),
+        "bright_yellow" => Ok(11),
+        "bright_blue" => Ok(12),
+        "bright_magenta" => Ok(13),
+        "bright_cyan" => Ok(14),
+        "bright_white" => Ok(15),
+        _ => Err(format!(
+            "Unknown color '{}'. Valid colors: black, red, green, yellow, blue, magenta, cyan, white, \
+             bright_black, bright_red, bright_green, bright_yellow, bright_blue, bright_magenta, bright_cyan, bright_white",
+            name
+        )),
+    }
 }
 
 //

@@ -6,7 +6,17 @@ use lazy_static::lazy_static;
 use std::fmt::Write;
 use std::str::FromStr;
 use textwrap::Options;
-use yansi::Paint;
+
+/// Style options for formatting commit hashes.
+#[derive(Clone, Default)]
+pub struct HashStyle {
+    /// Foreground color (ANSI 256-color code)
+    pub color: Option<u8>,
+    /// Apply bold formatting
+    pub bold: bool,
+    /// Background color (ANSI 256-color code)
+    pub background: Option<u8>,
+}
 
 /// Commit formatting options.
 #[derive(Ord, PartialOrd, Eq, PartialEq)]
@@ -81,7 +91,7 @@ pub fn format_commit(
     commit: &Commit,
     branches: String,
     wrapping: &Option<Options>,
-    hash_color: Option<u8>,
+    hash_style: Option<&HashStyle>,
 ) -> Result<Vec<String>, String> {
     // Find replacements
     let mut replacements = vec![];
@@ -108,7 +118,7 @@ pub fn format_commit(
     let mut lines = vec![];
     let mut out = String::new();
     let mut formatter = CommitFieldFormatter::new(
-        commit, &branches, hash_color, wrapping, &mut out, &mut lines,
+        commit, &branches, hash_style, wrapping, &mut out, &mut lines,
     );
 
     let mut curr = 0;
@@ -125,7 +135,7 @@ pub fn format_commit(
 struct CommitFieldFormatter<'a> {
     commit: &'a Commit<'a>,
     branches: &'a str,
-    hash_color: Option<u8>,
+    hash_style: Option<&'a HashStyle>,
     wrapping: &'a Option<Options<'a>>,
     out: &'a mut String,
     lines: &'a mut Vec<String>,
@@ -135,7 +145,7 @@ impl<'a> CommitFieldFormatter<'a> {
     fn new(
         commit: &'a Commit,
         branches: &'a str,
-        hash_color: Option<u8>,
+        hash_style: Option<&'a HashStyle>,
         wrapping: &'a Option<Options>,
         out: &'a mut String,
         lines: &'a mut Vec<String>,
@@ -143,7 +153,7 @@ impl<'a> CommitFieldFormatter<'a> {
         Self {
             commit,
             branches,
-            hash_color,
+            hash_style,
             wrapping,
             out,
             lines,
@@ -209,23 +219,15 @@ impl<'a> CommitFieldFormatter<'a> {
 
     fn format_hash(&mut self, mode: usize) {
         self.handle_mode(mode, true);
-        let id = self.commit.id();
-        if let Some(color) = self.hash_color {
-            self.out.push_str(&id.to_string().fixed(color).to_string());
-        } else {
-            self.out.push_str(&id.to_string());
-        }
+        let id = self.commit.id().to_string();
+        self.out.push_str(&apply_hash_style(&id, self.hash_style));
     }
 
     fn format_hash_abbrev(&mut self, mode: usize) {
         self.handle_mode(mode, true);
         let id = self.commit.id().to_string();
         let s = &id[..7];
-        if let Some(color) = self.hash_color {
-            self.out.push_str(&s.fixed(color).to_string());
-        } else {
-            self.out.push_str(s);
-        }
+        self.out.push_str(&apply_hash_style(s, self.hash_style));
     }
 
     fn format_parent_hashes(&mut self, mode: usize) -> Result<(), String> {
@@ -369,16 +371,12 @@ pub fn format_oneline(
     commit: &Commit,
     branches: String,
     wrapping: &Option<Options>,
-    hash_color: Option<u8>,
+    hash_style: Option<&HashStyle>,
 ) -> Vec<String> {
     let mut out = String::new();
-    let id = commit.id();
-    if let Some(color) = hash_color {
-        write!(out, "{}", id.to_string()[..7].fixed(color))
-    } else {
-        write!(out, "{}", &id.to_string()[..7])
-    }
-    .unwrap();
+    let id = commit.id().to_string();
+    let hash_str = apply_hash_style(&id[..7], hash_style);
+    write!(out, "{}", hash_str).unwrap();
 
     write!(out, "{} {}", branches, commit.summary().unwrap_or("")).unwrap();
 
@@ -398,13 +396,13 @@ pub fn format(
     commit: &Commit,
     branches: String,
     wrapping: &Option<Options>,
-    hash_color: Option<u8>,
+    hash_style: Option<&HashStyle>,
     format: &CommitFormat,
 ) -> Result<Vec<String>, String> {
     match format {
-        CommitFormat::OneLine => return Ok(format_oneline(commit, branches, wrapping, hash_color)),
+        CommitFormat::OneLine => return Ok(format_oneline(commit, branches, wrapping, hash_style)),
         CommitFormat::Format(format) => {
-            return format_commit(format, commit, branches, wrapping, hash_color)
+            return format_commit(format, commit, branches, wrapping, hash_style)
         }
         _ => {}
     }
@@ -412,13 +410,9 @@ pub fn format(
     let mut out_vec = vec![];
     let mut out = String::new();
 
-    let id = commit.id();
-    if let Some(color) = hash_color {
-        write!(out, "commit {}", id.to_string().fixed(color))
-    } else {
-        write!(out, "commit {}", &id)
-    }
-    .map_err(|err| err.to_string())?;
+    let id = commit.id().to_string();
+    let hash_str = apply_hash_style(&id, hash_style);
+    write!(out, "commit {}", hash_str).map_err(|err| err.to_string())?;
 
     write!(out, "{}", branches).map_err(|err| err.to_string())?;
     append_wrapped(&mut out_vec, out, wrapping);
@@ -493,6 +487,28 @@ pub fn format(
     }
 
     Ok(out_vec)
+}
+
+/// Apply styling (color, bold, background) to a hash string.
+fn apply_hash_style(hash: &str, style: Option<&HashStyle>) -> String {
+    match style {
+        None => hash.to_string(),
+        Some(s) => {
+            let mut styled = yansi::Painted::new(hash);
+
+            if let Some(color) = s.color {
+                styled = styled.fixed(color);
+            }
+            if s.bold {
+                styled = styled.bold();
+            }
+            if let Some(bg) = s.background {
+                styled = styled.on_fixed(bg);
+            }
+
+            styled.to_string()
+        }
+    }
 }
 
 pub fn format_date(time: Time, format: &str) -> String {
