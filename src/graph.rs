@@ -40,6 +40,7 @@ pub struct GitGraph {
 
 impl GitGraph {
     /// Generate a branch graph for a repository
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         mut repository: Repository,
         settings: &Settings,
@@ -47,6 +48,7 @@ impl GitGraph {
         max_count: Option<usize>,
     ) -> Result<Self, String> {
         #![doc = include_str!("../docs/branch_assignment.md")]
+
         let mut stashes = HashSet::new();
         repository
             .stash_foreach(|_, _, oid| {
@@ -59,13 +61,20 @@ impl GitGraph {
             .revwalk()
             .map_err(|err| err.message().to_string())?;
 
-        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
-            .map_err(|err| err.message().to_string())?;
+        // When max_count is specified with a start_point, use TIME-only sorting
+        // for faster iteration. Otherwise use TOPOLOGICAL | TIME for correct ordering.
+        if max_count.is_some() && start_point.is_some() {
+            walk.set_sorting(git2::Sort::TIME)
+                .map_err(|err| err.message().to_string())?;
+        } else {
+            walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+                .map_err(|err| err.message().to_string())?;
+        }
 
         // Use starting point if specified
-        if let Some(start) = start_point {
+        if let Some(start) = &start_point {
             let object = repository
-                .revparse_single(&start)
+                .revparse_single(start)
                 .map_err(|err| format!("Failed to resolve start point '{}': {}", start, err))?;
             walk.push(object.id())
                 .map_err(|err| err.message().to_string())?;
@@ -94,8 +103,12 @@ impl GitGraph {
             if let Ok(oid) = oid {
                 if !stashes.contains(&oid) {
                     let commit = repository.find_commit(oid).unwrap();
-
-                    commits.push(CommitInfo::new(&commit));
+                    let mut info = CommitInfo::new(&commit);
+                    // Cache summary only for merge commits (used to extract branch names)
+                    if info.is_merge {
+                        info.summary = commit.summary().map(|s| s.to_string());
+                    }
+                    commits.push(info);
                     indices.insert(oid, idx);
                     idx += 1;
                 }
@@ -105,6 +118,7 @@ impl GitGraph {
         assign_children(&mut commits, &indices);
 
         let mut all_branches = assign_branches(&repository, &mut commits, &indices, settings)?;
+
         correct_fork_merges(&commits, &indices, &mut all_branches, settings)?;
         assign_sources_targets(&commits, &indices, &mut all_branches);
 
@@ -212,6 +226,8 @@ pub struct CommitInfo {
     pub branches: Vec<usize>,
     pub tags: Vec<usize>,
     pub branch_trace: Option<usize>,
+    /// Cached summary for merge commits (used to extract branch names)
+    pub summary: Option<String>,
 }
 
 impl CommitInfo {
@@ -224,6 +240,7 @@ impl CommitInfo {
             branches: Vec::new(),
             tags: Vec::new(),
             branch_trace: None,
+            summary: None, // Will be populated later for merge commits
         }
     }
 }
@@ -345,9 +362,7 @@ fn assign_branches(
                     info.branches.push(old_idx);
                 }
                 let oid = info.oid;
-                let any_assigned =
-                    trace_branch(repository, commits, indices, &mut branches, oid, old_idx)
-                        .unwrap_or(false);
+                let any_assigned = trace_branch(commits, indices, &mut branches, oid, old_idx);
 
                 if any_assigned || !is_merged {
                     branch_idx += 1;
@@ -619,7 +634,6 @@ fn extract_actual_branches(
 /// Returns:
 /// A `Result` containing a `Vec<BranchInfo>` on success, or a `String` error message on failure.
 fn extract_merge_branches(
-    repository: &Repository,
     commits: &[CommitInfo],
     settings: &Settings,
     counter: &mut usize,
@@ -627,58 +641,53 @@ fn extract_merge_branches(
     let mut merge_branches = Vec::new();
 
     for (idx, info) in commits.iter().enumerate() {
-        // Only process if the commit is a merge.
-        if info.is_merge {
-            let commit = repository
-                .find_commit(info.oid)
-                .map_err(|err| err.message().to_string())?;
+        // Only process if the commit is a merge with a cached summary.
+        // Only process if the commit is a merge with a cached summary.
+        if let Some(summary) = &info.summary {
+            *counter += 1; // Increment counter for unique branch identification/coloring.
 
-            // Attempt to get the commit summary.
-            if let Some(summary) = commit.summary() {
-                *counter += 1; // Increment counter for unique branch identification/coloring.
+            // Use cached parent OID instead of calling find_commit
+            let Some(parent_oid) = info.parents[1] else {
+                continue;
+            };
 
-                let parent_oid = commit
-                    .parent_id(1)
-                    .map_err(|err| err.message().to_string())?;
+            // Parse the branch name from the merge summary using configured patterns.
+            let branch_name = parse_merge_summary(summary, &settings.merge_patterns)
+                .unwrap_or_else(|| "unknown".to_string());
 
-                // Parse the branch name from the merge summary using configured patterns.
-                let branch_name = parse_merge_summary(summary, &settings.merge_patterns)
-                    .unwrap_or_else(|| "unknown".to_string());
+            // Determine persistence and order for the derived branch.
+            let persistence = branch_order(&branch_name, &settings.branches.persistence) as u8;
+            let pos = branch_order(&branch_name, &settings.branches.order);
 
-                // Determine persistence and order for the derived branch.
-                let persistence = branch_order(&branch_name, &settings.branches.persistence) as u8;
-                let pos = branch_order(&branch_name, &settings.branches.order);
-
-                // Get terminal and SVG colors for the branch.
-                let term_col = to_terminal_color(
-                    &branch_color(
-                        &branch_name,
-                        &settings.branches.terminal_colors[..],
-                        &settings.branches.terminal_colors_unknown,
-                        *counter,
-                    )[..],
-                )?;
-                let svg_col = branch_color(
+            // Get terminal and SVG colors for the branch.
+            let term_col = to_terminal_color(
+                &branch_color(
                     &branch_name,
-                    &settings.branches.svg_colors,
-                    &settings.branches.svg_colors_unknown,
+                    &settings.branches.terminal_colors[..],
+                    &settings.branches.terminal_colors_unknown,
                     *counter,
-                );
+                )[..],
+            )?;
+            let svg_col = branch_color(
+                &branch_name,
+                &settings.branches.svg_colors,
+                &settings.branches.svg_colors_unknown,
+                *counter,
+            );
 
-                // Create and add the BranchInfo for the derived merge branch.
-                let branch_info = BranchInfo::new(
-                    parent_oid,     // Target is the parent of the merge.
-                    Some(info.oid), // The merge commit itself.
-                    branch_name,
-                    persistence,
-                    false, // Not a remote branch.
-                    true,  // This is a derived merge branch.
-                    false, // Not a tag.
-                    BranchVis::new(pos, term_col, svg_col),
-                    Some(idx + 1), // End index typically points to the commit after the merge.
-                );
-                merge_branches.push(branch_info);
-            }
+            // Create and add the BranchInfo for the derived merge branch.
+            let branch_info = BranchInfo::new(
+                parent_oid,     // Target is the parent of the merge.
+                Some(info.oid), // The merge commit itself.
+                branch_name,
+                persistence,
+                false, // Not a remote branch.
+                true,  // This is a derived merge branch.
+                false, // Not a tag.
+                BranchVis::new(pos, term_col, svg_col),
+                Some(idx + 1), // End index typically points to the commit after the merge.
+            );
+            merge_branches.push(branch_info);
         }
     }
     Ok(merge_branches)
@@ -799,7 +808,7 @@ fn extract_branches(
     all_branches.extend(actual_branches);
 
     // 2. Extract branches derived from merge commit summaries.
-    let merge_branches = extract_merge_branches(repository, commits, settings, &mut counter)?;
+    let merge_branches = extract_merge_branches(commits, settings, &mut counter)?;
     all_branches.extend(merge_branches);
 
     // 3. Extract tags and treat them as branches for visualization.
@@ -816,13 +825,12 @@ fn extract_branches(
 /// Traces back branches by following 1st commit parent,
 /// until a commit is reached that already has a trace.
 fn trace_branch(
-    repository: &Repository,
     commits: &mut [CommitInfo],
     indices: &HashMap<Oid, usize>,
     branches: &mut [BranchInfo],
     oid: Oid,
     branch_index: usize,
-) -> Result<bool, Error> {
+) -> bool {
     let mut curr_oid = oid;
     let mut prev_index: Option<usize> = None;
     let mut start_index: Option<i32> = None;
@@ -887,15 +895,16 @@ fn trace_branch(
         info.branch_trace = Some(branch_index);
         any_assigned = true;
 
-        let commit = repository.find_commit(curr_oid)?;
-        if commit.parent_count() == 0 {
+        // Use cached parent info instead of calling find_commit
+        if let Some(parent_oid) = commits[*index].parents[0] {
+            // Set `prev_index` to the current commit's index and move to the first parent.
+            prev_index = Some(*index);
+            curr_oid = parent_oid;
+        } else {
             // If no parents, this is the root commit, set `start_index` and break.
             start_index = Some(*index as i32);
             break;
         }
-        // Set `prev_index` to the current commit's index and move to the first parent.
-        prev_index = Some(*index);
-        curr_oid = commit.parent_id(0)?;
     }
 
     let branch = &mut branches[branch_index];
@@ -913,7 +922,7 @@ fn trace_branch(
     } else {
         branch.range = (branch.range.0, start_index.map(|si| si as usize));
     }
-    Ok(any_assigned)
+    any_assigned
 }
 
 /// Sorts branches into columns for visualization, that all branches can be
