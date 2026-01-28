@@ -775,11 +775,15 @@ fn format(
     // Determine hash style: use highlight_head settings for HEAD commit, otherwise default
     let hash_style = if color {
         if head.is_some() {
-            // HEAD commit - use highlight_head settings if available
-            settings.highlight_head.as_ref().map(|h| HashStyle {
-                color: h.color.or(Some(HASH_COLOR)),
-                bold: h.bold,
-                background: h.background,
+            // HEAD commit - use highlight_head settings if available, else use default
+            Some(HashStyle {
+                color: settings
+                    .highlight_head
+                    .as_ref()
+                    .and_then(|h| h.color)
+                    .or(Some(HASH_COLOR)),
+                bold: settings.highlight_head.as_ref().is_some_and(|h| h.bold),
+                background: settings.highlight_head.as_ref().and_then(|h| h.background),
             })
         } else {
             // Non-HEAD commit - use default hash color
