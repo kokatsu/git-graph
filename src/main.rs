@@ -341,7 +341,7 @@ fn select_config_dir(candidates: &[PathBuf], platform_dir: PathBuf) -> PathBuf {
 /// into the Nix store), and this runs before argument parsing, so failing here
 /// would block even `--help`.
 fn write_missing_default_models(models_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(models_dir).map_err(|err| err.to_string())?;
+    let _ = std::fs::create_dir_all(models_dir);
 
     let models = [
         (BranchSettingsDef::git_flow(), "git-flow.toml"),
@@ -845,5 +845,21 @@ mod tests {
         // Root ignores the permission bits, so only check that nothing failed.
         assert!(result.is_ok());
         assert!(available.contains(&"custom".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_missing_default_models_tolerates_uncreatable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = temp_dir("uncreatable");
+        let config = tmp.0.join("git-graph");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = write_missing_default_models(&config.join("models"));
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_ok());
     }
 }
