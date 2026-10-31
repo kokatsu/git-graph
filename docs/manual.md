@@ -225,11 +225,16 @@ git-graph --format "commit %H%nAuthor: %an %ae%n%n    %s%n"
 
 ## Custom branching models
 
-Branching models are configured using the files in `APP_DATA/git-graph/models`. 
+Branching models are configured using the files in `<config dir>/models`. The config dir is the first existing one of:
 
-* Windows: `C:\Users\<user>\AppData\Roaming\git-graph`
-* Linux: `~/.config/git-graph`
-* OSX: `~/Library/Application Support/git-graph`
+1. `$XDG_CONFIG_HOME/git-graph`
+2. `~/.config/git-graph`
+3. The platform default, created if missing:
+   * Windows: `C:\Users\<user>\AppData\Roaming\git-graph`
+   * Linux: `~/.config/git-graph`
+   * OSX: `~/Library/Application Support/git-graph`
+
+Missing preset models (`git-flow`, `simple`, `none`) are written to the models directory on every run, so it may also hold only custom models. A deleted preset therefore comes back on the next run. If the directory is read-only, missing presets are skipped and the existing models are used.
 
 File names of any `.toml` files in the `models` directory can be used in parameter `--model`, or via sub-command `model`. E.g., to use a branching model defined in `my-model.toml`, use:
 

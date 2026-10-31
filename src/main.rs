@@ -13,7 +13,7 @@ use crate::print::svg::print_svg;
 use clap::ArgMatches;
 use clap::{crate_version, Arg, Command};
 use git2::Repository;
-use gleisbau::config::{create_config, get_available_models, get_model, get_model_name, set_model};
+use gleisbau::config::{get_available_models, get_model, get_model_name, set_model};
 use gleisbau::get_repo;
 use gleisbau::graph::Builder as GraphBuilder;
 use gleisbau::print::format::CommitFormat;
@@ -26,7 +26,7 @@ use platform_dirs::AppDirs;
 use std::borrow::Borrow;
 use std::io;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
@@ -292,15 +292,70 @@ fn match_repo_args(ses: &mut Session, matches: &ArgMatches) -> Result<(), String
 //  "model" subcommand
 //
 
-/// Fill APP_dir/git-graph folder with default models
+/// Pick the config dir (see `config_dir_candidates`) and fill its models
+/// folder with any missing preset models
 fn store_default_models(ses: &mut Session) -> Result<(), String> {
-    let app_dir = AppDirs::new(Some("git-graph"), false).unwrap().config_dir;
-    let mut models_dir = app_dir;
+    let platform_dir = AppDirs::new(Some("git-graph"), false).unwrap().config_dir;
+    let mut models_dir = select_config_dir(&config_dir_candidates(), platform_dir);
     models_dir.push("models");
 
-    create_config(&models_dir)?;
+    write_missing_default_models(&models_dir)?;
 
     ses.models_dir = models_dir;
+    Ok(())
+}
+
+/// XDG-style config directories, tried before the platform default
+/// (which on macOS is `~/Library/Application Support`).
+fn config_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        // The XDG spec says relative paths are invalid and must be ignored.
+        if xdg.is_absolute() {
+            candidates.push(xdg.join("git-graph"));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        // An empty or relative HOME would resolve against the working directory.
+        if home.is_absolute() {
+            candidates.push(home.join(".config").join("git-graph"));
+        }
+    }
+    candidates
+}
+
+/// Returns the first existing candidate, so users without an XDG-style
+/// directory keep using the platform default.
+fn select_config_dir(candidates: &[PathBuf], platform_dir: PathBuf) -> PathBuf {
+    candidates
+        .iter()
+        .find(|dir| dir.is_dir())
+        .cloned()
+        .unwrap_or(platform_dir)
+}
+
+/// Writes each preset model whose file is missing. Unlike
+/// `gleisbau::config::create_config`, this also fills a models directory that
+/// already exists, e.g. one created by a dotfiles manager holding only custom models.
+/// Write failures are ignored: the directory may be read-only (e.g. a symlink
+/// into the Nix store), and this runs before argument parsing, so failing here
+/// would block even `--help`.
+fn write_missing_default_models(models_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(models_dir).map_err(|err| err.to_string())?;
+
+    let models = [
+        (BranchSettingsDef::git_flow(), "git-flow.toml"),
+        (BranchSettingsDef::simple(), "simple.toml"),
+        (BranchSettingsDef::none(), "none.toml"),
+    ];
+    for (model, file) in &models {
+        let path = models_dir.join(file);
+        if path.exists() {
+            continue;
+        }
+        let str = toml::to_string_pretty(&model).map_err(|err| err.to_string())?;
+        let _ = std::fs::write(&path, str);
+    }
     Ok(())
 }
 
@@ -707,4 +762,88 @@ fn io_err_to_string(result: Result<(), io::Error>) -> Result<(), String> {
             e.to_string()
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Removes the directory on drop.
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("git-graph-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    #[test]
+    fn select_config_dir_prefers_first_existing_candidate() {
+        let tmp = temp_dir("select-existing");
+        let root = &tmp.0;
+        let missing = root.join("xdg/git-graph");
+        let dot_config = root.join("home/.config/git-graph");
+        std::fs::create_dir_all(&dot_config).unwrap();
+
+        let selected = select_config_dir(&[missing, dot_config.clone()], root.join("platform"));
+        assert_eq!(selected, dot_config);
+    }
+
+    #[test]
+    fn select_config_dir_falls_back_to_platform_dir() {
+        let tmp = temp_dir("select-fallback");
+        let root = &tmp.0;
+        let platform = root.join("platform");
+
+        let selected = select_config_dir(&[root.join("xdg/git-graph")], platform.clone());
+        assert_eq!(selected, platform);
+    }
+
+    #[test]
+    fn write_missing_default_models_keeps_existing_files() {
+        let tmp = temp_dir("write-missing");
+        let models = tmp.0.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("custom.toml"), "custom").unwrap();
+        std::fs::write(models.join("simple.toml"), "edited").unwrap();
+
+        write_missing_default_models(&models).unwrap();
+
+        let mut available = get_available_models(&models).unwrap();
+        available.sort();
+        assert_eq!(available, ["custom", "git-flow", "none", "simple"]);
+        assert_eq!(
+            std::fs::read_to_string(models.join("simple.toml")).unwrap(),
+            "edited"
+        );
+        let git_flow = std::fs::read_to_string(models.join("git-flow.toml")).unwrap();
+        assert!(toml::from_str::<BranchSettingsDef>(&git_flow).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_missing_default_models_tolerates_read_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = temp_dir("read-only");
+        let models = tmp.0.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("custom.toml"), "custom").unwrap();
+        std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = write_missing_default_models(&models);
+        let available = get_available_models(&models).unwrap();
+        std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Root ignores the permission bits, so only check that nothing failed.
+        assert!(result.is_ok());
+        assert!(available.contains(&"custom".to_string()));
+    }
 }
