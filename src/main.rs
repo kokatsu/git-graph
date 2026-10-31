@@ -16,10 +16,12 @@ use git2::Repository;
 use gleisbau::config::{get_available_models, get_model, get_model_name, set_model};
 use gleisbau::get_repo;
 use gleisbau::graph::Builder as GraphBuilder;
+use gleisbau::print::colors::to_terminal_color;
 use gleisbau::print::format::CommitFormat;
 use gleisbau::print::unicode::print_unicode;
 use gleisbau::settings::{
-    BranchOrder, BranchSettings, BranchSettingsDef, Characters, MergePatterns, Settings,
+    BranchOrder, BranchSettings, BranchSettingsDef, Characters, HighlightHead, MergePatterns,
+    Settings,
 };
 use itertools::enumerate;
 use platform_dirs::AppDirs;
@@ -86,6 +88,7 @@ fn match_args() -> ArgMatches {
     let app = add_color_args(app);
     let app = add_wrap_args(app);
     let app = add_format_args(app);
+    let app = add_highlight_head_args(app);
 
     let app = app
         .arg(
@@ -196,6 +199,7 @@ fn configure_session(ses: &mut Session, matches: &ArgMatches) -> Result<bool, St
     let colored = match_color_args(ses, matches)?;
 
     let wrapping = match_wrap_args(ses, matches)?;
+    let highlight_head = match_highlight_head_args(matches)?;
 
     let settings = Settings {
         reverse_commit_order,
@@ -209,6 +213,7 @@ fn configure_session(ses: &mut Session, matches: &ArgMatches) -> Result<bool, St
         branch_order: BranchOrder::ShortestFirst(true),
         branches: BranchSettings::from(model).map_err(|err| err.to_string())?,
         merge_patterns: MergePatterns::default(),
+        highlight_head,
     };
     ses.settings = Some(settings);
 
@@ -673,6 +678,60 @@ fn match_format_args(_ses: &mut Session, matches: &ArgMatches) -> Result<CommitF
 }
 
 //
+//  highlight-head flag
+//
+
+fn add_highlight_head_args(app: Command) -> Command {
+    app.arg(
+        Arg::new("highlight-head")
+            .long("highlight-head")
+            .help(
+                "Style the HEAD commit hash. Comma-separated list of: bold, <color>, bg:<color>\n\
+                   For colors, consult 'git-graph --help'",
+            )
+            .long_help(
+                "Style the HEAD commit hash. Comma-separated list of:\n    \
+                     bold          Make the hash bold\n    \
+                     <color>       Foreground color\n    \
+                     bg:<color>    Background color\n\
+                 Colors are the terminal colors of branching models: black, red, green,\n\
+                 yellow, blue, magenta, cyan, white, each also prefixed with 'bright_',\n\
+                 or an index of the 256-color palette.\n\
+                 Examples:\n    \
+                     git-graph --highlight-head bold\n    \
+                     git-graph --highlight-head \"bold,black,bg:bright_yellow\"",
+            )
+            .required(false)
+            .num_args(1),
+    )
+}
+
+fn match_highlight_head_args(matches: &ArgMatches) -> Result<Option<HighlightHead>, String> {
+    matches
+        .get_one::<String>("highlight-head")
+        .map(|value| parse_highlight_head(value))
+        .transpose()
+}
+
+fn parse_highlight_head(value: &str) -> Result<HighlightHead, String> {
+    let mut highlight = HighlightHead::default();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if part == "bold" {
+            highlight.bold = true;
+        } else if let Some(color) = part.strip_prefix("bg:") {
+            highlight.background = Some(to_terminal_color(color.trim())?);
+        } else {
+            highlight.color = Some(to_terminal_color(part)?);
+        }
+    }
+    Ok(highlight)
+}
+
+//
 //  Run application
 //
 
@@ -767,6 +826,29 @@ fn io_err_to_string(result: Result<(), io::Error>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_highlight_head_reads_all_options() {
+        let highlight = parse_highlight_head("bold, black ,bg: bright_yellow").unwrap();
+
+        assert!(highlight.bold);
+        assert_eq!(highlight.color, Some(0));
+        assert_eq!(highlight.background, Some(11));
+    }
+
+    #[test]
+    fn parse_highlight_head_accepts_palette_index() {
+        let highlight = parse_highlight_head("208").unwrap();
+
+        assert!(!highlight.bold);
+        assert_eq!(highlight.color, Some(208));
+        assert_eq!(highlight.background, None);
+    }
+
+    #[test]
+    fn parse_highlight_head_rejects_unknown_color() {
+        assert!(parse_highlight_head("bold,not_a_color").is_err());
+    }
 
     /// Removes the directory on drop.
     struct TempDir(PathBuf);
